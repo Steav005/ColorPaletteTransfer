@@ -1,0 +1,12 @@
+[package]
+name = "color_palatte_transfer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ncollide3d = "0.32"
+chashmap = "2.2"
+rayon = "1.5"
+palette = "0.6"
+image = "0.24"
+argparse = "0.2"

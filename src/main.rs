@@ -1,4 +1,4 @@
-use argparse::{ArgumentParser, Store, StoreTrue};
+use argparse::{ArgumentParser, Store,};
 use chashmap::CHashMap;
 use image::io::Reader as ImageReader;
 use image::save_buffer_with_format;
@@ -11,7 +11,13 @@ use palette::rgb::FromHexError;
 use palette::Srgb;
 use rayon::prelude::*;
 use std::str::FromStr;
-use std::time::Instant;
+use std::sync::Arc;
+use std::thread;
+use std::thread::sleep;
+use std::time::Duration;
+use atomic_counter::RelaxedCounter;
+use atomic_counter::AtomicCounter;
+use indicatif::{ProgressBar, ProgressStyle};
 
 const NORD: [&str; 16] = [
     "#2E3440", "#3B4252", "#434C5E", "#4C566A", "#D8DEE9", "#E5E9F0", "#ECEFF4", "#8FBCBB",
@@ -27,15 +33,12 @@ enum TransferError {
 }
 
 fn main() -> Result<(), TransferError> {
-    let mut timing = false;
     let mut output = String::from("");
     let mut colors = String::from("");
     let mut image = String::from("");
     {
         let mut ap = ArgumentParser::new();
         ap.set_description("Converts image to color palette");
-        ap.refer(&mut timing)
-            .add_option(&["-t", "--timing"], StoreTrue, "Prints timings");
         ap.refer(&mut output)
             .add_option(&["-o", "--output"], Store, "Set output name. \
             Tries to honour set extension. \
@@ -60,11 +63,12 @@ fn main() -> Result<(), TransferError> {
     };
 
     // Generate Color Palette based on
+    println!("[1/4] Generating Color Space");
     let palette = ColorPaletteSpace::new(colors.as_slice())?;
 
-    let now = Instant::now();
     // Open Image
-    let img = ImageReader::open(image).map_err(|e| TransferError::IoError(e))?;
+    println!("[2/4] Open Image");
+    let img = ImageReader::open(image.clone()).map_err(|e| TransferError::IoError(e))?;
     // Use format from Output file, input file or fallback to jpeg
     let format = ImageFormat::from_path(&output)
         .unwrap_or_else(|_| img.format().unwrap_or_else(|| ImageFormat::Jpeg));
@@ -73,34 +77,48 @@ fn main() -> Result<(), TransferError> {
         .map_err(|e| TransferError::ImgError(e))?
         .to_rgb8();
     let dim = img.dimensions();
-    if timing {
-        println!("Read took {:?}", now.elapsed());
-    }
-    let now = Instant::now();
+
+    let counter = Arc::new(RelaxedCounter::new(0));
+    let counter2 = counter.clone();
+    let num_pixel = dim.0 * dim.1;
+    println!("[3/4] Calculating Pixel");
+    thread::spawn(move || {
+        let pb = ProgressBar::new(num_pixel as u64);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")
+            .progress_chars("##-"));
+        loop {
+            let num = counter2.get();
+            pb.set_position(num as u64);
+            if num >= num_pixel as usize {
+                pb.finish_and_clear();
+                return;
+            }
+            sleep(Duration::from_millis(12));
+        }
+    });
 
     let mut pixel: Vec<_> = img.pixels().cloned().collect();
     // Apply new colors in parallel
     let bytes: Vec<u8> = pixel
         .par_drain(..)
-        .flat_map_iter(|rgb| palette.get_color(&rgb.0))
+        .flat_map_iter(|rgb| {
+            let rgb = palette.get_color(&rgb.0);
+            counter.inc();
+            rgb
+        })
         .collect();
-    if timing {
-        println!("Transfer took {:?}", now.elapsed());
-    }
-    let now = Instant::now();
 
     // Determine output name
     let output = if output.is_empty() {
-        format!("out.{}", format.extensions_str()[0])
+        format!("{}-out.{}", image.split('.').next().unwrap_or_else(|| "o"), format.extensions_str()[0])
     } else {
         output
     };
     // Write to file
+    println!("[4/4] Write Image");
     save_buffer_with_format(output, &bytes, dim.0, dim.1, image::ColorType::Rgb8, format)
         .map_err(|e| TransferError::ImgError(e))?;
-    if timing {
-        println!("Write took {:?}", now.elapsed());
-    }
 
     Ok(())
 }
